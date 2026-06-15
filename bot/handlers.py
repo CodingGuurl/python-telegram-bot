@@ -1,136 +1,79 @@
-"""Telegram update handlers."""
+"""Taxi dispatch bot handlers."""
 
 import logging
-
-from telegram import ReplyKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 logger = logging.getLogger(__name__)
 
-BOT_COMMANDS = (
-    ("start", "Show the main menu"),
-    ("help", "Show help"),
-    ("about", "Show bot information"),
-    ("ping", "Check bot status"),
-)
+courses = {}
+course_counter = [0]
 
-MENU_HELP = "Help"
-MENU_ABOUT = "About"
-MENU_PING = "Ping"
+BOT_COMMANDS = [("start", "Demarrer le bot")]
 
-MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
-    [[MENU_HELP, MENU_ABOUT], [MENU_PING]],
-    resize_keyboard=True,
-    is_persistent=True,
-    input_field_placeholder="Choose a menu item",
-)
+async def set_bot_commands(app: Application):
+    await app.bot.set_my_commands(BOT_COMMANDS)
 
-HELP_TEXT = """Available commands:
-/start - Start the bot
-/help - Show help
-/about - Show bot information
-/ping - Check bot status
+async def error_handler(update, context):
+    logger.error("Erreur: %s", context.error)
 
-Send a normal text message and the bot will echo it back."""
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
-    message = update.effective_message
-    user = update.effective_user
-    if message is None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        await update.message.reply_text(f"ID de ce groupe : {update.effective_chat.id}")
         return
+    await update.message.reply_text("🚖 Bot Taxi actif.\n\nEnvoyez les details de la course ici.")
 
-    name = user.first_name if user and user.first_name else "friend"
-    await message.reply_text(
-        f"Hello, {name}! The bot is running.\n\n"
-        "Choose a menu button below or type /help to see the available commands.",
-        reply_markup=MAIN_MENU_KEYBOARD,
-    )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
-    message = update.effective_message
-    if message is None:
+async def recevoir_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
         return
+    texte = update.message.text
+    agent_nom = update.effective_user.first_name or "Agent"
+    course_counter[0] += 1
+    course_id = course_counter[0]
+    courses[course_id] = {"texte": texte, "agent": agent_nom, "statut": "libre", "chauffeur": None}
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🚗 PRENDRE LA COURSE", callback_data=f"prendre_{course_id}")]])
+    await update.message.reply_text(f"✅ Course #{course_id} publiee!")
 
-    await message.reply_text(HELP_TEXT)
-
-
-async def about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
-    message = update.effective_message
-    if message is None:
+async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    course_id = int(query.data.split("_")[1])
+    chauffeur = query.from_user.first_name or "Chauffeur"
+    chauffeur_id = query.from_user.id
+    if course_id not in courses:
+        await query.answer("Course introuvable.", show_alert=True)
         return
-
-    await message.reply_text(
-        "This bot is built with python-telegram-bot and is ready to deploy on Railway."
-    )
-
-
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
-    message = update.effective_message
-    if message is None:
+    course = courses[course_id]
+    if course["statut"] != "libre":
+        await query.answer("Course deja prise!", show_alert=True)
         return
+    course["statut"] = "prise"
+    course["chauffeur"] = chauffeur
+    course["chauffeur_id"] = chauffeur_id
+    await query.edit_message_text(f"🚖 COURSE #{course_id} PRISE par {chauffeur}\n\n{course['texte']}")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Course effectuee", callback_data=f"done_{course_id}")],
+        [InlineKeyboardButton("⚠️ Probleme", callback_data=f"probleme_{course_id}")]
+    ])
+    await context.bot.send_message(chat_id=chauffeur_id, text=f"✅ Course #{course_id} confirmee!\n\n{course['texte']}\n\nConfirmez quand termine:", reply_markup=keyboard)
 
-    await message.reply_text("pong")
-
-
-async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if message is None or not message.text:
+async def valider_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split("_")[0]
+    course_id = int(query.data.split("_")[1])
+    if course_id not in courses:
         return
+    course = courses[course_id]
+    if action == "done":
+        course["statut"] = "terminee"
+        await query.edit_message_text(f"✅ Course #{course_id} terminee!\n\n{course['texte']}")
+    elif action == "probleme":
+        course["statut"] = "probleme"
+        await query.edit_message_text(f"⚠️ Probleme - Course #{course_id}\n\n{course['texte']}")
 
-    text = message.text.strip()
-    if text == MENU_HELP:
-        await help_command(update, context)
-    elif text == MENU_ABOUT:
-        await about(update, context)
-    elif text == MENU_PING:
-        await ping(update, context)
-
-
-async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
-    message = update.effective_message
-    if message is None or not message.text:
-        return
-
-    await message.reply_text(f"You sent:\n{message.text}")
-
-
-async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    del context
-    message = update.effective_message
-    if message is None:
-        return
-
-    await message.reply_text("Unknown command. Type /help for assistance.")
-
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("Error while processing update: %s", update, exc_info=context.error)
-
-    if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text(
-            "Sorry, an error occurred while processing your message."
-        )
-
-
-async def set_bot_commands(application: Application) -> None:
-    await application.bot.set_my_commands(BOT_COMMANDS)
-
-
-def register_handlers(application: Application) -> None:
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("about", about))
-    application.add_handler(CommandHandler("ping", ping))
-    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
-    application.add_handler(
-        MessageHandler(filters.Regex(f"^({MENU_HELP}|{MENU_ABOUT}|{MENU_PING})$"), menu_button)
-    )
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
+def register_handlers(app: Application):
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, recevoir_course))
+    app.add_handler(CallbackQueryHandler(prendre_course, pattern=r"^prendre_"))
+    app.add_handler(CallbackQueryHandler(val
