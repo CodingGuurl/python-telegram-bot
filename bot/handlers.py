@@ -6,6 +6,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 logger = logging.getLogger(__name__)
 
+GROUPE_CHAUFFEURS_ID = -1003468031320
+
 courses = {}
 course_counter = [0]
 
@@ -36,7 +38,15 @@ async def recevoir_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "statut": "libre",
         "chauffeur": None
     }
-    await update.message.reply_text(f"✅ Course #{course_id} publiee!")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚗 PRENDRE LA COURSE", callback_data=f"prendre_{course_id}")]
+    ])
+    await context.bot.send_message(
+        chat_id=GROUPE_CHAUFFEURS_ID,
+        text=f"🚖 NOUVELLE COURSE #{course_id}\n👩‍💼 Agent: {agent_nom}\n\n{texte}",
+        reply_markup=keyboard
+    )
+    await update.message.reply_text(f"✅ Course #{course_id} publiee dans le groupe chauffeurs!")
 
 async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
