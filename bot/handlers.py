@@ -1,6 +1,8 @@
 """Taxi dispatch bot handlers."""
 
 import logging
+import os
+from supabase import create_client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -8,8 +10,10 @@ logger = logging.getLogger(__name__)
 
 GROUPE_CHAUFFEURS_ID = -1003468031320
 
-courses = {}
-course_counter = [0]
+supabase = create_client(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_KEY")
+)
 
 BOT_COMMANDS = [("start", "Demarrer le bot")]
 
@@ -30,14 +34,15 @@ async def recevoir_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     texte = update.message.text
     agent_nom = update.effective_user.first_name or "Agent"
-    course_counter[0] += 1
-    course_id = course_counter[0]
-    courses[course_id] = {
-        "texte": texte,
+
+    result = supabase.table("courses").insert({
         "agent": agent_nom,
-        "statut": "libre",
-        "chauffeur": None
-    }
+        "texte": texte,
+        "statut": "libre"
+    }).execute()
+
+    course_id = result.data[0]["id"]
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🚗 PRENDRE LA COURSE", callback_data=f"prendre_{course_id}")]
     ])
@@ -54,16 +59,23 @@ async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     course_id = int(query.data.split("_")[1])
     chauffeur = query.from_user.first_name or "Chauffeur"
     chauffeur_id = query.from_user.id
-    if course_id not in courses:
+
+    result = supabase.table("courses").select("*").eq("id", course_id).execute()
+    if not result.data:
         await query.answer("Course introuvable.", show_alert=True)
         return
-    course = courses[course_id]
+
+    course = result.data[0]
     if course["statut"] != "libre":
         await query.answer("Course deja prise!", show_alert=True)
         return
-    course["statut"] = "prise"
-    course["chauffeur"] = chauffeur
-    course["chauffeur_id"] = chauffeur_id
+
+    supabase.table("courses").update({
+        "statut": "prise",
+        "chauffeur": chauffeur,
+        "chauffeur_id": chauffeur_id
+    }).eq("id", course_id).execute()
+
     await query.edit_message_text(
         f"🚖 COURSE #{course_id} PRISE par {chauffeur}\n\n{course['texte']}"
     )
@@ -82,16 +94,19 @@ async def valider_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     action = query.data.split("_")[0]
     course_id = int(query.data.split("_")[1])
-    if course_id not in courses:
+
+    result = supabase.table("courses").select("*").eq("id", course_id).execute()
+    if not result.data:
         return
-    course = courses[course_id]
+    course = result.data[0]
+
     if action == "done":
-        course["statut"] = "terminee"
+        supabase.table("courses").update({"statut": "terminee"}).eq("id", course_id).execute()
         await query.edit_message_text(
             f"✅ Course #{course_id} terminee!\n\n{course['texte']}"
         )
     elif action == "probleme":
-        course["statut"] = "probleme"
+        supabase.table("courses").update({"statut": "probleme"}).eq("id", course_id).execute()
         await query.edit_message_text(
             f"⚠️ Probleme - Course #{course_id}\n\n{course['texte']}"
         )
