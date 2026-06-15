@@ -2,6 +2,7 @@
 
 import logging
 import os
+from datetime import datetime
 from supabase import create_client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -34,6 +35,8 @@ async def recevoir_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     texte = update.message.text
     agent_nom = update.effective_user.first_name or "Agent"
+    now = datetime.now()
+    label = f"{now.strftime('%d/%m %Hh%M')} - {agent_nom}"
 
     result = supabase.table("courses").insert({
         "agent": agent_nom,
@@ -48,10 +51,10 @@ async def recevoir_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await context.bot.send_message(
         chat_id=GROUPE_CHAUFFEURS_ID,
-        text=f"🚖 NOUVELLE COURSE #{course_id}\n👩‍💼 Agent: {agent_nom}\n\n{texte}",
+        text=f"🚖 COURSE {label}\n\n{texte}",
         reply_markup=keyboard
     )
-    await update.message.reply_text(f"✅ Course #{course_id} publiee dans le groupe chauffeurs!")
+    await update.message.reply_text(f"✅ Course {label} publiee dans le groupe chauffeurs!")
 
 async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -77,7 +80,7 @@ async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }).eq("id", course_id).execute()
 
     await query.edit_message_text(
-        f"🚖 COURSE #{course_id} PRISE par {chauffeur}\n\n{course['texte']}"
+        f"🚖 COURSE PRISE par {chauffeur}\n\n{course['texte']}"
     )
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Course effectuee", callback_data=f"done_{course_id}")],
@@ -85,7 +88,7 @@ async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await context.bot.send_message(
         chat_id=chauffeur_id,
-        text=f"✅ Course #{course_id} confirmee!\n\n{course['texte']}\n\nConfirmez quand termine:",
+        text=f"✅ Course confirmee!\n\n{course['texte']}\n\nConfirmez quand termine:",
         reply_markup=keyboard
     )
 
@@ -103,12 +106,12 @@ async def valider_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "done":
         supabase.table("courses").update({"statut": "terminee"}).eq("id", course_id).execute()
         await query.edit_message_text(
-            f"✅ Course #{course_id} terminee!\n\n{course['texte']}"
+            f"✅ Course terminee!\n\n{course['texte']}"
         )
     elif action == "probleme":
         supabase.table("courses").update({"statut": "probleme"}).eq("id", course_id).execute()
         await query.edit_message_text(
-            f"⚠️ Probleme - Course #{course_id}\n\n{course['texte']}"
+            f"⚠️ Probleme signale\n\n{course['texte']}"
         )
 
 def register_handlers(app: Application):
