@@ -83,20 +83,32 @@ async def recevoir_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
-    supabase.table("courses").update({
-        "agent_msg_id": sent.message_id
-    }).eq("id", course_id).execute()
-
     sent_agent = await update.message.reply_text(
         f"📍 Statut: En attente\n\n{texte}\n\nVous serez notifie quand un chauffeur la prend."
     )
 
     supabase.table("courses").update({
+        "agent_msg_id": sent.message_id,
         "agent_notif_msg_id": sent_agent.message_id
     }).eq("id", course_id).execute()
 
+async def maj_groupe(context, course, statut_texte, keyboard=None):
+    """Met a jour le message dans le groupe chauffeurs."""
+    msg_id = course.get("agent_msg_id")
+    if not msg_id:
+        return
+    try:
+        await context.bot.edit_message_text(
+            chat_id=GROUPE_CHAUFFEURS_ID,
+            message_id=msg_id,
+            text=f"🚖 COURSE\n\n{course['texte']}\n\n📍 Statut: {statut_texte}",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.warning(f"Impossible d'editer le message groupe: {e}")
+
 async def maj_notif_agent(context, course, statut_texte):
-    """Met a jour le message de suivi chez l'agent (edite au lieu de spammer)."""
+    """Met a jour le message de suivi chez l'agent."""
     agent_id = course.get("agent_id")
     msg_id = course.get("agent_notif_msg_id")
     if not agent_id or not msg_id:
@@ -135,12 +147,11 @@ async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     course["chauffeur"] = chauffeur
 
     await query.edit_message_text(
-        f"🚖 COURSE PRISE par {chauffeur}\n\n{course['texte']}\n\n📍 Statut: Prise"
+        f"🚖 COURSE\n\n{course['texte']}\n\n📍 Statut: Prise par {chauffeur}"
     )
 
     await maj_notif_agent(context, course, f"Prise par {chauffeur}")
 
-    # Message de suivi chauffeur, avec boutons de progression - UN SEUL message edite
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🚗 En route", callback_data=f"enroute_{course_id}")]
     ])
@@ -167,6 +178,7 @@ async def suivi_enroute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase.table("courses").update({"statut": "en_route"}).eq("id", course_id).execute()
 
     await maj_notif_agent(context, course, f"En route ({course['chauffeur']})")
+    await maj_groupe(context, course, f"En route ({course['chauffeur']})")
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Course en cours", callback_data=f"encours_{course_id}")]
@@ -189,6 +201,7 @@ async def suivi_encours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase.table("courses").update({"statut": "en_cours"}).eq("id", course_id).execute()
 
     await maj_notif_agent(context, course, f"En cours ({course['chauffeur']})")
+    await maj_groupe(context, course, f"En cours ({course['chauffeur']})")
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Course effectuee", callback_data=f"done_{course_id}")],
@@ -212,6 +225,7 @@ async def valider_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "done":
         supabase.table("courses").update({"statut": "terminee"}).eq("id", course_id).execute()
+        await maj_groupe(context, course, f"✅ Terminee ({course['chauffeur']})")
         await query.edit_message_text(
             f"📍 Statut: Terminee\n\n{course['texte']}\n\n"
             f"Merci d'envoyer votre compte rendu:\n"
@@ -220,11 +234,11 @@ async def valider_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data["attente_rendu"] = course_id
         context.user_data["agent_id"] = course.get("agent_id")
-        context.user_data["course_id_rendu"] = course_id
 
     elif action == "probleme":
         supabase.table("courses").update({"statut": "probleme"}).eq("id", course_id).execute()
         await maj_notif_agent(context, course, f"⚠️ Probleme signale ({course['chauffeur']})")
+        await maj_groupe(context, course, f"⚠️ Probleme ({course['chauffeur']})")
         await query.edit_message_text(
             f"📍 Statut: Probleme\n\n{course['texte']}\n\n"
             f"Decrivez le probleme rencontre:"
@@ -265,7 +279,6 @@ async def recevoir_rendu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "attente_rendu" in context.user_data:
         course_id = context.user_data.pop("attente_rendu")
         context.user_data.pop("agent_id", None)
-        context.user_data.pop("course_id_rendu", None)
 
         if update.message.photo:
             caption = update.message.caption or "Aucune remarque"
