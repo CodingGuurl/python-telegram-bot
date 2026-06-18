@@ -2,7 +2,7 @@
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from supabase import create_client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -13,6 +13,7 @@ GROUPE_AGENTS_TERRAIN_ID = int(os.getenv("GROUPE_TERRAIN_ID", "0"))
 NOM_ENTREPRISE = os.getenv("NOM_ENTREPRISE", "Dispatch")
 NOM_UNITE = os.getenv("NOM_UNITE", "Tache")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+RELANCE_MINUTES = int(os.getenv("RELANCE_MINUTES", "30"))
 
 STEPS_RAW = os.getenv("STEPS", "En route,En cours")
 STEPS = [s.strip() for s in STEPS_RAW.split(",") if s.strip()]
@@ -25,6 +26,7 @@ supabase = create_client(
 BOT_COMMANDS = [
     ("start", "Demarrer le bot"),
     ("taches", "Voir les taches en attente"),
+    ("mestaches", "Voir mes taches en cours"),
 ]
 
 async def set_bot_commands(app: Application):
@@ -54,7 +56,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 Bot {NOM_ENTREPRISE} actif.\n\n"
             f"Envoyez les details de la {NOM_UNITE.lower()} ici.\n\n"
             f"Commandes:\n"
-            f"/taches - Voir les taches en attente"
+            f"/taches - Voir les taches en attente\n"
+            f"/mestaches - Voir mes taches en cours"
         )
         return
 
@@ -70,7 +73,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Nouvel utilisateur - on cree la demande
     supabase.table("utilisateurs").insert({
         "user_id": user_id,
         "nom": nom,
@@ -156,6 +158,59 @@ async def liste_taches(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"🔹 {NOM_UNITE} #{t['id']} — Agent: {t['agent']}\n{t['texte']}\n\n"
     await update.message.reply_text(msg)
 
+async def mes_taches(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    user_id = update.effective_user.id
+    utilisateur = get_utilisateur(user_id)
+    if not utilisateur or utilisateur["statut"] != "approuve":
+        await update.message.reply_text("⏳ Vous n'etes pas encore autorise. Tapez /start")
+        return
+
+    if utilisateur["role"] == "executant":
+        # Toutes les taches prises par cet executant, pas encore terminees
+        statuts_actifs = ["prise"] + [f"etape_{i}" for i in range(len(STEPS))]
+        result = supabase.table("tasks").select("*").eq("chauffeur_id", user_id).in_("statut", statuts_actifs).execute()
+
+        if not result.data:
+            await update.message.reply_text("✅ Vous n'avez aucune tache en cours.")
+            return
+
+        msg = f"📋 VOS {NOM_UNITE.upper()}S EN COURS:\n\n"
+        for t in result.data:
+            etape_idx = t.get("etape_index", -1)
+            if etape_idx >= 0 and etape_idx < len(STEPS):
+                statut_label = STEPS[etape_idx]
+            else:
+                statut_label = "Assignee"
+            msg += f"🔹 {NOM_UNITE} #{t['id']} — {statut_label}\n{t['texte']}\n\n"
+        await update.message.reply_text(msg)
+
+    elif utilisateur["role"] == "agent":
+        # Toutes les taches postees par cet agent, pas encore terminees/annulees
+        statuts_actifs = ["libre", "prise"] + [f"etape_{i}" for i in range(len(STEPS))]
+        result = supabase.table("tasks").select("*").eq("agent_id", user_id).in_("statut", statuts_actifs).execute()
+
+        if not result.data:
+            await update.message.reply_text("✅ Vous n'avez aucune tache active.")
+            return
+
+        msg = f"📋 VOS {NOM_UNITE.upper()}S ACTIVES:\n\n"
+        for t in result.data:
+            statut = t.get("statut", "libre")
+            if statut == "libre":
+                statut_label = "En attente"
+            elif statut == "prise":
+                statut_label = f"Prise par {t.get('chauffeur', '?')}"
+            elif statut.startswith("etape_"):
+                idx = int(statut.split("_")[1])
+                statut_label = f"{STEPS[idx]} ({t.get('chauffeur', '?')})"
+            else:
+                statut_label = statut
+            msg += f"🔹 {NOM_UNITE} #{t['id']} — {statut_label}\n{t['texte']}\n\n"
+        await update.message.reply_text(msg)
+
 async def recevoir_tache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -184,7 +239,8 @@ async def recevoir_tache(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "agent_id": agent_id,
         "texte": texte,
         "statut": "libre",
-        "etape_index": -1
+        "etape_index": -1,
+        "relance_envoyee": False
     }).execute()
 
     task_id = result.data[0]["id"]
@@ -418,9 +474,40 @@ async def recevoir_rendu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"⚠️ Probleme sur {NOM_UNITE} #{task_id} signale par {executant}:\n{texte}"
             )
 
+async def verifier_relances(context: ContextTypes.DEFAULT_TYPE):
+    seuil = datetime.now(timezone.utc) - timedelta(minutes=RELANCE_MINUTES)
+
+    result = supabase.table("tasks").select("*").eq("statut", "libre").eq("relance_envoyee", False).execute()
+
+    for task in result.data:
+        created_at_str = task.get("created_at")
+        if not created_at_str:
+            continue
+        try:
+            created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        if created_at < seuil:
+            agent_id = task.get("agent_id")
+            if agent_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=agent_id,
+                        text=(
+                            f"⏰ Personne n'a encore pris votre {NOM_UNITE.lower()} "
+                            f"depuis plus de {RELANCE_MINUTES} minutes.\n\n{task['texte']}"
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Impossible de notifier l'agent {agent_id}: {e}")
+
+            supabase.table("tasks").update({"relance_envoyee": True}).eq("id", task["id"]).execute()
+
 def register_handlers(app: Application):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("taches", liste_taches))
+    app.add_handler(CommandHandler("mestaches", mes_taches))
     app.add_handler(CallbackQueryHandler(gerer_validation, pattern=r"^approve_|^refuse_"))
     app.add_handler(CallbackQueryHandler(prendre_tache, pattern=r"^prendre_"))
     app.add_handler(CallbackQueryHandler(annuler_tache, pattern=r"^annuler_"))
@@ -428,3 +515,6 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(valider_tache, pattern=r"^done_|^probleme_"))
     app.add_handler(MessageHandler(filters.PHOTO, recevoir_rendu))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, recevoir_tache))
+
+    if app.job_queue:
+        app.job_queue.run_repeating(verifier_relances, interval=300, first=60)
