@@ -77,15 +77,38 @@ async def recevoir_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🚗 PRENDRE LA COURSE", callback_data=f"prendre_{course_id}")],
         [InlineKeyboardButton("❌ ANNULER LA COURSE", callback_data=f"annuler_{course_id}")]
     ])
-    await context.bot.send_message(
+    sent = await context.bot.send_message(
         chat_id=GROUPE_CHAUFFEURS_ID,
-        text=f"🚖 COURSE {label}\n\n{texte}",
+        text=f"🚖 COURSE {label}\n\n{texte}\n\n📍 Statut: Libre",
         reply_markup=keyboard
     )
-    await update.message.reply_text(
-        f"✅ Course {label} publiee dans le groupe chauffeurs!\n\n"
-        f"Vous serez notifie quand un chauffeur la prend."
+
+    supabase.table("courses").update({
+        "agent_msg_id": sent.message_id
+    }).eq("id", course_id).execute()
+
+    sent_agent = await update.message.reply_text(
+        f"📍 Statut: En attente\n\n{texte}\n\nVous serez notifie quand un chauffeur la prend."
     )
+
+    supabase.table("courses").update({
+        "agent_notif_msg_id": sent_agent.message_id
+    }).eq("id", course_id).execute()
+
+async def maj_notif_agent(context, course, statut_texte):
+    """Met a jour le message de suivi chez l'agent (edite au lieu de spammer)."""
+    agent_id = course.get("agent_id")
+    msg_id = course.get("agent_notif_msg_id")
+    if not agent_id or not msg_id:
+        return
+    try:
+        await context.bot.edit_message_text(
+            chat_id=agent_id,
+            message_id=msg_id,
+            text=f"📍 Statut: {statut_texte}\n\n{course['texte']}"
+        )
+    except Exception as e:
+        logger.warning(f"Impossible d'editer le message agent: {e}")
 
 async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -109,34 +132,27 @@ async def prendre_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "chauffeur": chauffeur,
         "chauffeur_id": chauffeur_id
     }).eq("id", course_id).execute()
-
-    now = datetime.now()
-    label = now.strftime('%d/%m %Hh%M')
+    course["chauffeur"] = chauffeur
 
     await query.edit_message_text(
-        f"🚖 COURSE PRISE par {chauffeur} a {label}\n\n{course['texte']}"
+        f"🚖 COURSE PRISE par {chauffeur}\n\n{course['texte']}\n\n📍 Statut: Prise"
     )
 
-    # Notification a l'agent
-    if course.get("agent_id"):
-        await context.bot.send_message(
-            chat_id=course["agent_id"],
-            text=f"✅ Votre course a ete prise par {chauffeur} a {label}!\n\n{course['texte']}"
-        )
+    await maj_notif_agent(context, course, f"Prise par {chauffeur}")
 
-    # Message au chauffeur avec suivi etape par etape
+    # Message de suivi chauffeur, avec boutons de progression - UN SEUL message edite
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚗 Je suis en route", callback_data=f"enroute_{course_id}")]
+        [InlineKeyboardButton("🚗 En route", callback_data=f"enroute_{course_id}")]
     ])
-    await context.bot.send_message(
+    sent = await context.bot.send_message(
         chat_id=chauffeur_id,
-        text=(
-            f"✅ Course assignee!\n\n"
-            f"{course['texte']}\n\n"
-            f"Cliquez quand vous etes en route vers le client 👇"
-        ),
+        text=f"📍 Statut: Assignee\n\n{course['texte']}\n\nCliquez pour mettre a jour 👇",
         reply_markup=keyboard
     )
+
+    supabase.table("courses").update({
+        "chauffeur_msg_id": sent.message_id
+    }).eq("id", course_id).execute()
 
 async def suivi_enroute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -150,18 +166,13 @@ async def suivi_enroute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     supabase.table("courses").update({"statut": "en_route"}).eq("id", course_id).execute()
 
-    # Notification agent
-    if course.get("agent_id"):
-        await context.bot.send_message(
-            chat_id=course["agent_id"],
-            text=f"🚗 Le chauffeur {course['chauffeur']} est en route vers le client!\n\n{course['texte']}"
-        )
+    await maj_notif_agent(context, course, f"En route ({course['chauffeur']})")
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Course en cours", callback_data=f"encours_{course_id}")]
     ])
     await query.edit_message_text(
-        f"🚗 Vous etes en route!\n\n{course['texte']}\n\nCliquez quand vous avez pris le client 👇",
+        f"📍 Statut: En route\n\n{course['texte']}\n\nCliquez pour mettre a jour 👇",
         reply_markup=keyboard
     )
 
@@ -177,19 +188,14 @@ async def suivi_encours(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     supabase.table("courses").update({"statut": "en_cours"}).eq("id", course_id).execute()
 
-    # Notification agent
-    if course.get("agent_id"):
-        await context.bot.send_message(
-            chat_id=course["agent_id"],
-            text=f"▶️ La course est en cours! Chauffeur: {course['chauffeur']}\n\n{course['texte']}"
-        )
+    await maj_notif_agent(context, course, f"En cours ({course['chauffeur']})")
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Course effectuee", callback_data=f"done_{course_id}")],
         [InlineKeyboardButton("⚠️ Signaler un probleme", callback_data=f"probleme_{course_id}")]
     ])
     await query.edit_message_text(
-        f"▶️ Course en cours!\n\n{course['texte']}\n\nCliquez quand la course est terminee 👇",
+        f"📍 Statut: En cours\n\n{course['texte']}\n\nCliquez quand la course est terminee 👇",
         reply_markup=keyboard
     )
 
@@ -207,18 +213,20 @@ async def valider_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "done":
         supabase.table("courses").update({"statut": "terminee"}).eq("id", course_id).execute()
         await query.edit_message_text(
-            f"✅ Course terminee!\n\n{course['texte']}\n\n"
+            f"📍 Statut: Terminee\n\n{course['texte']}\n\n"
             f"Merci d'envoyer votre compte rendu:\n"
             f"- Une photo de la confirmation de paiement\n"
             f"- Ou un message avec vos remarques"
         )
         context.user_data["attente_rendu"] = course_id
         context.user_data["agent_id"] = course.get("agent_id")
+        context.user_data["course_id_rendu"] = course_id
 
     elif action == "probleme":
         supabase.table("courses").update({"statut": "probleme"}).eq("id", course_id).execute()
+        await maj_notif_agent(context, course, f"⚠️ Probleme signale ({course['chauffeur']})")
         await query.edit_message_text(
-            f"⚠️ Probleme signale\n\n{course['texte']}\n\n"
+            f"📍 Statut: Probleme\n\n{course['texte']}\n\n"
             f"Decrivez le probleme rencontre:"
         )
         context.user_data["attente_probleme"] = course_id
@@ -245,11 +253,7 @@ async def annuler_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ COURSE ANNULEE\n\n{course['texte']}"
     )
 
-    if course.get("agent_id"):
-        await context.bot.send_message(
-            chat_id=course["agent_id"],
-            text=f"❌ La course a ete annulee.\n\n{course['texte']}"
-        )
+    await maj_notif_agent(context, course, "❌ Annulee")
 
 async def recevoir_rendu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -261,6 +265,7 @@ async def recevoir_rendu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "attente_rendu" in context.user_data:
         course_id = context.user_data.pop("attente_rendu")
         context.user_data.pop("agent_id", None)
+        context.user_data.pop("course_id_rendu", None)
 
         if update.message.photo:
             caption = update.message.caption or "Aucune remarque"
